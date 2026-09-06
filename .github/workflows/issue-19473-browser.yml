@@ -21,6 +21,7 @@ env:
   NX_DAEMON: false
   BASE_SHA: 6081fb70b2447119ccdac44519e9a587a134b1c2
   CANDIDATE_SHA: 3956d45e77c879ce6a9e3e5f71d2063c7e4caad1
+  BUDIBASE_IMAGE: budibase/budibase@sha256:79a09831f46da5e67138ff13d95b26c8ff89cd484d398ac8ff85510e14ba8c8d
 
 jobs:
   browser:
@@ -42,18 +43,48 @@ jobs:
           echo "::add-mask::$password"
           echo "TEST_PASSWORD=$password" >> "$GITHUB_ENV"
           git rev-parse HEAD > evidence/workflow-sha.txt
+      - name: Start isolated real Budibase backend
+        run: |
+          docker pull "$BUDIBASE_IMAGE"
+          docker image inspect "$BUDIBASE_IMAGE" --format '{{json .RepoDigests}}' > evidence/backend-image-digests.json
+          docker run --detach --name issue-19473-budibase --publish 127.0.0.1:10000:80 --env BB_ADMIN_USER_EMAIL=issue19473@example.test --env BB_ADMIN_USER_PASSWORD="$TEST_PASSWORD" "$BUDIBASE_IMAGE"
+          ready=0
+          for attempt in $(seq 1 90); do
+            if curl --silent --fail 'http://127.0.0.1:10000/api/global/configs/checklist?tenantId=default' -o "$RUNNER_TEMP/checklist.json"; then
+              if python3 -c 'import json,os; from pathlib import Path; d=json.loads((Path(os.environ["RUNNER_TEMP"])/"checklist.json").read_text()); raise SystemExit(0 if d.get("adminUser", {}).get("checked") is True else 1)'; then ready=1; break; fi
+            fi
+            sleep 2
+          done
+          test "$ready" = 1
+          echo 'Bootstrap checklist confirms the administrator exists.' > evidence/bootstrap-readiness.txt
       - name: Retrieve the public reproduction and source revisions
         run: |
           curl --fail --location --max-time 90 --max-filesize 26214400 'https://github.com/user-attachments/files/30976419/Form.Validation-export-1786529294690.tar.gz' -o "$RUNNER_TEMP/reproduction.tar.gz"
           echo "ab29d1903dd42958a71b136e122d3edc2e54fd9fc48eaeecb927062c501df04d  $RUNNER_TEMP/reproduction.tar.gz" | sha256sum -c -
           git fetch --depth=1 origin "$BASE_SHA" "$CANDIDATE_SHA"
           git show "$BASE_SHA:packages/client/src/utils/buttonActions.js" > packages/client/src/utils/buttonActions.js
+      - name: Restore dependency cache
+        id: dependencies
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: issue-19473-browser-${{ runner.os }}-node22-${{ hashFiles('yarn.lock') }}
       - name: Install dependencies and browser
         run: |
           npm install --global yarn@1.22.22
           yarn --frozen-lockfile 2>&1 | tee evidence/install.log
           npm install --prefix "$RUNNER_TEMP/browser" playwright@1.58.2
           "$RUNNER_TEMP/browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Save dependency cache
+        if: steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
       - name: Build the unchanged upstream client
         run: |
           yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/upstream-build.log
@@ -64,17 +95,6 @@ jobs:
           yarn workspace @budibase/client build 2>&1 | tee evidence/candidate-build.log
           cp -a packages/client/dist "$RUNNER_TEMP/client-candidate"
           sha256sum "$RUNNER_TEMP/client-upstream/budibase-client.js" "$RUNNER_TEMP/client-candidate/budibase-client.js" > evidence/bundle-sha256.txt
-      - name: Start isolated real Budibase backend
-        run: |
-          docker pull budibase/budibase:latest
-          docker image inspect budibase/budibase:latest --format '{{json .RepoDigests}}' > evidence/backend-image-digests.json
-          docker run --detach --name issue-19473-budibase --publish 127.0.0.1:10000:80 --env BB_ADMIN_USER_EMAIL=issue19473@example.test --env BB_ADMIN_USER_PASSWORD="$TEST_PASSWORD" budibase/budibase:latest
-          ready=0
-          for attempt in $(seq 1 120); do
-            if curl --silent --fail http://127.0.0.1:10000/api/global/auth/init > "$RUNNER_TEMP/init.json"; then ready=1; break; fi
-            sleep 2
-          done
-          test "$ready" = 1
       - name: Exercise the imported fixture and explicit form configuration
         run: node scripts/issue-19473-browser.cjs 2>&1 | tee evidence/browser-console.log
       - name: Collect container diagnostics and clean up
