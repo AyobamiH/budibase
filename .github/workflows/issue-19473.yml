@@ -1,0 +1,72 @@
+name: Issue 19473 validation
+
+on:
+  push:
+    branches: [ci/19473-form-validation]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-19473-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  HUSKY: 0
+  CI: true
+  NX_DAEMON: false
+
+jobs:
+  baseline:
+    if: github.repository == 'AyobamiH/budibase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+      - name: Record environment
+        run: |
+          mkdir -p evidence
+          { git rev-parse HEAD; node --version; npm --version; docker --version; df -h .; } | tee evidence/environment.log
+      - name: Install Yarn
+        run: npm install --global yarn@1.22.22
+      - name: Install repository dependencies
+        id: install
+        run: yarn --frozen-lockfile 2>&1 | tee evidence/install.log
+      - name: Existing native client tests
+        id: tests
+        if: success()
+        continue-on-error: true
+        run: yarn workspace @budibase/client test 2>&1 | tee evidence/client-tests.log
+      - name: Build frontend and its dependencies
+        id: build
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        run: yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/client-build.log
+      - name: Client type checking
+        id: types
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: yarn workspace @budibase/client check:types 2>&1 | tee evidence/client-types.log
+      - name: Baseline outcome
+        if: always()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+          BUILD: ${{ steps.build.outcome }}
+          TYPES: ${{ steps.types.outcome }}
+        run: |
+          printf 'install=%s\ntests=%s\nbuild=%s\ntypes=%s\n' "$INSTALL" "$TESTS" "$BUILD" "$TYPES" | tee evidence/outcome.txt >> "$GITHUB_STEP_SUMMARY"
+          test "$INSTALL" = success && test "$TESTS" = success && test "$BUILD" = success && test "$TYPES" = success
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-19473-baseline
+          path: evidence/
+          retention-days: 7
