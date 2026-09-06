@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: issue-19473-${{ github.ref }}
   cancel-in-progress: true
@@ -38,16 +42,15 @@ jobs:
       - name: Install repository dependencies
         id: install
         run: yarn --frozen-lockfile 2>&1 | tee evidence/install.log
-      - name: Existing native client tests
-        id: tests
-        if: success()
-        continue-on-error: true
-        run: yarn workspace @budibase/client test 2>&1 | tee evidence/client-tests.log
       - name: Build frontend and its dependencies
         id: build
-        if: steps.install.outcome == 'success'
         continue-on-error: true
         run: yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/client-build.log
+      - name: Existing native client tests
+        id: tests
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: yarn workspace @budibase/client test --reporter=default --reporter=json --outputFile="$GITHUB_WORKSPACE/evidence/client-tests.json" 2>&1 | tee evidence/client-tests.log
       - name: Client type checking
         id: types
         if: steps.build.outcome == 'success'
@@ -68,5 +71,65 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: issue-19473-baseline
+          path: evidence/
+          retention-days: 7
+
+  inspect-reproduction:
+    if: github.repository == 'AyobamiH/budibase'
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Inspect public issue attachment without executing or extracting it
+        run: |
+          mkdir -p evidence
+          curl --fail --location --max-time 90 --max-filesize 26214400 'https://github.com/user-attachments/files/30976419/Form.Validation-export-1786529294690.tar.gz' -o "$RUNNER_TEMP/reproduction.tar.gz"
+          python3 - <<'PY'
+          import hashlib, json, os, tarfile
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'reproduction.tar.gz'
+          report = {'archiveSha256': hashlib.sha256(path.read_bytes()).hexdigest(), 'members': [], 'tables': [], 'components': [], 'saveActions': [], 'features': [], 'parsedDocuments': 0}
+          def walk(value):
+              if isinstance(value, list):
+                  for item in value: walk(item)
+              elif isinstance(value, dict):
+                  if str(value.get('_id', '')).startswith('ta_') and isinstance(value.get('schema'), dict):
+                      report['tables'].append({k: value.get(k) for k in ('_id', 'name', 'primaryDisplay', 'schema')})
+                  if '_component' in value:
+                      report['components'].append({k: value[k] for k in ('_id', '_component', '_instanceName', 'schema', 'dataSource', 'disableSchemaValidation', 'field', 'validation') if k in value})
+                  if value.get('##eventHandlerType') == 'Save Row':
+                      p = value.get('parameters') or {}
+                      report['saveActions'].append({'providerId': p.get('providerId'), 'tableId': p.get('tableId'), 'fieldOverrideKeys': list((p.get('fields') or {}).keys()), 'parameterKeys': list(p.keys())})
+                  if 'suppressErrorNotifications' in value:
+                      report['features'].append({'suppressErrorNotifications': value['suppressErrorNotifications']})
+                  for item in value.values(): walk(item)
+          with tarfile.open(path, 'r:gz') as archive:
+              total = 0
+              for member in archive:
+                  report['members'].append({'name': member.name, 'size': member.size})
+                  if not member.isfile() or member.size > 4000000: continue
+                  total += member.size
+                  if total > 25000000: raise RuntimeError('Archive content limit exceeded')
+                  try: text = archive.extractfile(member).read().decode('utf-8')
+                  except UnicodeDecodeError: continue
+                  try: documents = [json.loads(text)]
+                  except json.JSONDecodeError:
+                      documents = []
+                      for line in text.splitlines():
+                          try: documents.append(json.loads(line))
+                          except json.JSONDecodeError: pass
+                  for document in documents:
+                      report['parsedDocuments'] += 1
+                      walk(document)
+          output = json.dumps(report, indent=2)
+          Path('evidence/reproduction-structure.json').write_text(output)
+          print(output)
+          if not report['saveActions']: raise RuntimeError('No Save Row action parsed; fixture inspection incomplete')
+          PY
+      - name: Preserve structural report only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-19473-reproduction-structure
           path: evidence/
           retention-days: 7
