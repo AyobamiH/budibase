@@ -62,6 +62,11 @@ export const getActionDependentContextKeys = action => {
   const type = action?.["##eventHandlerType"]
   switch (type) {
     case "Save Row":
+      if (action.parameters?.providerId) {
+        const { providerId } = action.parameters
+        return [providerId, `${providerId}_${ActionTypes.ValidateForm}`]
+      }
+      break
     case "Duplicate Row":
       if (action.parameters?.providerId) {
         return [action.parameters.providerId]
@@ -102,6 +107,29 @@ const saveRowHandler = async (action, context) => {
     })
     return { row }
   } catch (error) {
+    const validationErrors = error?.json?.validationErrors
+    if (
+      providerId &&
+      (!fields || !Object.keys(fields).length) &&
+      validationErrors &&
+      typeof validationErrors === "object" &&
+      !Array.isArray(validationErrors) &&
+      Object.keys(validationErrors).length
+    ) {
+      // Reveal errors on untouched form fields after a rejected save. Field
+      // overrides must not be validated against the original form values.
+      const validateForm = context[`${providerId}_${ActionTypes.ValidateForm}`]
+      if (typeof validateForm === "function") {
+        try {
+          await validateForm()
+        } catch (validationError) {
+          console.error(
+            "Failed to display form validation errors",
+            validationError
+          )
+        }
+      }
+    }
     // Abort next actions
     return false
   }
