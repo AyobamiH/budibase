@@ -1,0 +1,91 @@
+name: Issue 19473 real browser evidence
+
+on:
+  push:
+    branches: [ci/19473-browser-evidence]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: issue-19473-browser
+  cancel-in-progress: true
+
+env:
+  HUSKY: 0
+  CI: true
+  NX_DAEMON: false
+  BASE_SHA: 6081fb70b2447119ccdac44519e9a587a134b1c2
+  CANDIDATE_SHA: 3956d45e77c879ce6a9e3e5f71d2063c7e4caad1
+
+jobs:
+  browser:
+    if: github.repository == 'AyobamiH/budibase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+      - name: Prepare evidence and ephemeral credentials
+        run: |
+          mkdir -p evidence
+          password="Bb19473-$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          echo "TEST_PASSWORD=$password" >> "$GITHUB_ENV"
+          git rev-parse HEAD > evidence/workflow-sha.txt
+      - name: Retrieve the public reproduction and source revisions
+        run: |
+          curl --fail --location --max-time 90 --max-filesize 26214400 'https://github.com/user-attachments/files/30976419/Form.Validation-export-1786529294690.tar.gz' -o "$RUNNER_TEMP/reproduction.tar.gz"
+          echo "ab29d1903dd42958a71b136e122d3edc2e54fd9fc48eaeecb927062c501df04d  $RUNNER_TEMP/reproduction.tar.gz" | sha256sum -c -
+          git fetch --depth=1 origin "$BASE_SHA" "$CANDIDATE_SHA"
+          git show "$BASE_SHA:packages/client/src/utils/buttonActions.js" > packages/client/src/utils/buttonActions.js
+      - name: Install dependencies and browser
+        run: |
+          npm install --global yarn@1.22.22
+          yarn --frozen-lockfile 2>&1 | tee evidence/install.log
+          npm install --prefix "$RUNNER_TEMP/browser" playwright@1.58.2
+          "$RUNNER_TEMP/browser/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Build the unchanged upstream client
+        run: |
+          yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/upstream-build.log
+          cp -a packages/client/dist "$RUNNER_TEMP/client-upstream"
+      - name: Build the candidate client
+        run: |
+          git show "$CANDIDATE_SHA:packages/client/src/utils/buttonActions.js" > packages/client/src/utils/buttonActions.js
+          yarn workspace @budibase/client build 2>&1 | tee evidence/candidate-build.log
+          cp -a packages/client/dist "$RUNNER_TEMP/client-candidate"
+          sha256sum "$RUNNER_TEMP/client-upstream/budibase-client.js" "$RUNNER_TEMP/client-candidate/budibase-client.js" > evidence/bundle-sha256.txt
+      - name: Start isolated real Budibase backend
+        run: |
+          docker pull budibase/budibase:latest
+          docker image inspect budibase/budibase:latest --format '{{json .RepoDigests}}' > evidence/backend-image-digests.json
+          docker run --detach --name issue-19473-budibase --publish 127.0.0.1:10000:80 --env BB_ADMIN_USER_EMAIL=issue19473@example.test --env BB_ADMIN_USER_PASSWORD="$TEST_PASSWORD" budibase/budibase:latest
+          ready=0
+          for attempt in $(seq 1 120); do
+            if curl --silent --fail http://127.0.0.1:10000/api/global/auth/init > "$RUNNER_TEMP/init.json"; then ready=1; break; fi
+            sleep 2
+          done
+          test "$ready" = 1
+      - name: Exercise the imported fixture and explicit form configuration
+        run: node scripts/issue-19473-browser.cjs 2>&1 | tee evidence/browser-console.log
+      - name: Collect container diagnostics and clean up
+        if: always()
+        run: |
+          docker logs --tail 250 issue-19473-budibase > evidence/container.log 2>&1 || true
+          docker rm --force --volumes issue-19473-budibase || true
+      - name: Preserve browser and build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-19473-browser
+          path: evidence/
+          retention-days: 7
