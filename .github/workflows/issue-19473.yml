@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: issue-19473-${{ github.ref }}
   cancel-in-progress: true
@@ -27,7 +31,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: false
-          fetch-depth: 3
+          fetch-depth: 5
       - uses: actions/setup-node@v6
         with:
           node-version: 22.x
@@ -41,8 +45,13 @@ jobs:
       - name: Install repository dependencies
         id: install
         run: yarn --frozen-lockfile 2>&1 | tee evidence/install.log
+      - name: Build frontend and its dependencies
+        id: build
+        continue-on-error: true
+        run: yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/client-build.log
       - name: Prove regression tests fail on unmodified upstream
         id: red
+        if: steps.build.outcome == 'success'
         continue-on-error: true
         run: |
           source_file=packages/client/src/utils/buttonActions.js
@@ -65,14 +74,14 @@ jobs:
           ].sort()
           const failed = report.testResults.flatMap(suite => suite.assertionResults)
             .filter(test => test.status === 'failed').map(test => test.title).sort()
-          if (report.numFailedTests !== 4 || JSON.stringify(failed) !== JSON.stringify(expected)) {
-            throw new Error(`Unexpected baseline failures: ${JSON.stringify(failed)}`)
+          if (report.numTotalTests !== 18 || report.numFailedTests !== 4 || JSON.stringify(failed) !== JSON.stringify(expected)) {
+            throw new Error(`Unexpected baseline results: total=${report.numTotalTests}; failures=${JSON.stringify(failed)}`)
           }
-          console.log('Exactly the four intended regression assertions fail on upstream.')
+          console.log('Exactly the four intended regression assertions fail on upstream; fourteen other assertions pass.')
           JS
       - name: Candidate native client suite
         id: tests
-        if: steps.install.outcome == 'success'
+        if: steps.build.outcome == 'success'
         continue-on-error: true
         run: |
           git diff --exit-code -- packages/client/src/utils/buttonActions.js
@@ -84,11 +93,6 @@ jobs:
         run: |
           yarn eslint packages/client/src/utils/buttonActions.js packages/client/src/utils/buttonActions.test.js 2>&1 | tee evidence/eslint.log
           yarn prettier --check packages/client/src/utils/buttonActions.js packages/client/src/utils/buttonActions.test.js 2>&1 | tee evidence/prettier.log
-      - name: Build frontend and its dependencies
-        id: build
-        if: steps.install.outcome == 'success'
-        continue-on-error: true
-        run: yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/client-build.log
       - name: Client type checking
         id: types
         if: steps.build.outcome == 'success'
