@@ -20,7 +20,7 @@ env:
   CI: true
   NX_DAEMON: false
   BASE_SHA: 6081fb70b2447119ccdac44519e9a587a134b1c2
-  CANDIDATE_SHA: 3956d45e77c879ce6a9e3e5f71d2063c7e4caad1
+  CANDIDATE_SHA: a5fe6315435a9045059ec1733eebfb8d727c3edb
   BUDIBASE_IMAGE: budibase/budibase@sha256:79a09831f46da5e67138ff13d95b26c8ff89cd484d398ac8ff85510e14ba8c8d
 
 jobs:
@@ -43,6 +43,7 @@ jobs:
           echo "::add-mask::$password"
           echo "TEST_PASSWORD=$password" >> "$GITHUB_ENV"
           git rev-parse HEAD > evidence/workflow-sha.txt
+          printf 'baseline=%s\ncandidate=%s\n' "$BASE_SHA" "$CANDIDATE_SHA" > evidence/source-shas.txt
       - name: Start isolated real Budibase backend
         run: |
           docker pull "$BUDIBASE_IMAGE"
@@ -57,12 +58,25 @@ jobs:
           done
           test "$ready" = 1
           echo 'Bootstrap checklist confirms the administrator exists.' > evidence/bootstrap-readiness.txt
-      - name: Retrieve the public reproduction and source revisions
+      - name: Start loopback-only HTTP/2 proxy
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -sha256 -days 1 -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' -keyout "$RUNNER_TEMP/proxy-key.pem" -out "$RUNNER_TEMP/proxy-cert.pem"
+          node scripts/issue-19473-h2-proxy.cjs > evidence/proxy.log 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/proxy.pid"
+          ready=0
+          for attempt in $(seq 1 15); do
+            if curl --insecure --silent --fail https://127.0.0.1:10443/api/global/auth/init > /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1
+      - name: Retrieve reproduction and immutable source revisions
         run: |
           curl --fail --location --max-time 90 --max-filesize 26214400 'https://github.com/user-attachments/files/30976419/Form.Validation-export-1786529294690.tar.gz' -o "$RUNNER_TEMP/reproduction.tar.gz"
           echo "ab29d1903dd42958a71b136e122d3edc2e54fd9fc48eaeecb927062c501df04d  $RUNNER_TEMP/reproduction.tar.gz" | sha256sum -c -
           git fetch --depth=1 origin "$BASE_SHA" "$CANDIDATE_SHA"
           git show "$BASE_SHA:packages/client/src/utils/buttonActions.js" > packages/client/src/utils/buttonActions.js
+          git show "$BASE_SHA:packages/client/src/api/api.ts" > packages/client/src/api/api.ts
+          git diff --exit-code "$BASE_SHA" -- packages/
       - name: Restore dependency cache
         id: dependencies
         uses: actions/cache/restore@v5
@@ -85,21 +99,24 @@ jobs:
             node_modules
             packages/*/node_modules
           key: ${{ steps.dependencies.outputs.cache-primary-key }}
-      - name: Build the unchanged upstream client
+      - name: Build unchanged upstream client
         run: |
           yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/upstream-build.log
           cp -a packages/client/dist "$RUNNER_TEMP/client-upstream"
-      - name: Build the candidate client
+      - name: Build API-layer candidate without changing Save Row
         run: |
-          git show "$CANDIDATE_SHA:packages/client/src/utils/buttonActions.js" > packages/client/src/utils/buttonActions.js
+          git show "$CANDIDATE_SHA:packages/client/src/api/api.ts" > packages/client/src/api/api.ts
+          git diff --exit-code "$BASE_SHA" -- packages/client/src/utils/buttonActions.js
+          git diff -- "$BASE_SHA" > evidence/source.patch
           yarn workspace @budibase/client build 2>&1 | tee evidence/candidate-build.log
           cp -a packages/client/dist "$RUNNER_TEMP/client-candidate"
           sha256sum "$RUNNER_TEMP/client-upstream/budibase-client.js" "$RUNNER_TEMP/client-candidate/budibase-client.js" > evidence/bundle-sha256.txt
-      - name: Exercise the imported fixture and explicit form configuration
+      - name: Verify real protocol, error visibility, and corrected saves
         run: node scripts/issue-19473-browser.cjs 2>&1 | tee evidence/browser-console.log
-      - name: Collect container diagnostics and clean up
+      - name: Collect diagnostics and remove disposable services
         if: always()
         run: |
+          if test -f "$RUNNER_TEMP/proxy.pid"; then kill "$(cat "$RUNNER_TEMP/proxy.pid")" || true; fi
           docker logs --tail 250 issue-19473-budibase > evidence/container.log 2>&1 || true
           docker rm --force --volumes issue-19473-budibase || true
       - name: Preserve browser and build evidence
