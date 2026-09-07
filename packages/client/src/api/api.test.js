@@ -1,14 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import "./api"
 
-const { callbacks, appStore, notificationStore, sessionBannerStore, recaptchaStore } =
-  vi.hoisted(() => ({
-    callbacks: {},
-    appStore: { value: {} },
-    notificationStore: { actions: { error: vi.fn() } },
-    sessionBannerStore: { set: vi.fn() },
-    recaptchaStore: { actions: { unverified: vi.fn() } },
-  }))
+const {
+  callbacks,
+  appStore,
+  notificationStore,
+  sessionBannerStore,
+  recaptchaStore,
+} = vi.hoisted(() => ({
+  callbacks: {},
+  appStore: { value: {} },
+  notificationStore: { actions: { error: vi.fn() } },
+  sessionBannerStore: { set: vi.fn() },
+  recaptchaStore: { actions: { unverified: vi.fn() } },
+}))
 
 vi.mock("@budibase/frontend-core", () => ({
   createAPIClient: config => {

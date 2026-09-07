@@ -107,7 +107,7 @@ export const API = createAPIClient({
               `${field} ${validationErrors[field]}`
             )
           }
-        } else {
+        } else if (message) {
           notificationStore.actions.error(message)
         }
       }
