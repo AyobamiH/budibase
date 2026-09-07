@@ -27,7 +27,7 @@ function visit(value, fn) {
 
 async function main() {
   browser = await chromium.launch({ headless: true })
-  context = await browser.newContext({ baseURL: origin, viewport: { width: 1280, height: 900 } })
+  context = await browser.newContext({ baseURL: origin, viewport: { width: 1280, height: 900 }, serviceWorkers: 'block' })
   await json(await context.request.post('/api/global/auth/default/login', {
     data: { username: 'issue19473@example.test', password: process.env.TEST_PASSWORD },
   }), 'login')
@@ -46,20 +46,28 @@ async function main() {
       },
     },
   }), 'import')
-  assert.ok(app._id, 'Imported workspace has an ID')
-  const headers = { 'x-budibase-app-id': app._id }
+  const appId = app.appId
+  assert.match(appId || '', /^app_dev_/, 'Import returns a development workspace appId, not the app_metadata document ID')
+  report.workspace = { appId, metadataId: app._id, url: app.url }
+  const headers = { 'x-budibase-app-id': appId }
   const screensResponse = await json(await context.request.get('/api/screens', { headers }), 'screens')
   const screens = Array.isArray(screensResponse) ? screensResponse : screensResponse.screens
   assert.ok(Array.isArray(screens), 'Screens response is an array')
+  report.screenSummary = screens.map(screen => ({ id: screen._id, name: screen.name, routing: screen.routing, workspaceAppId: screen.workspaceAppId }))
   let screen, form, button, eventKey
   for (const candidate of screens) {
+    let candidateForm, candidateButton, candidateEvent
     visit(candidate, node => {
-      if (node._component?.endsWith('/form')) form = node
+      if (node._component?.endsWith('/form')) candidateForm = node
       if (node._component?.endsWith('/button')) {
         const key = Object.keys(node).find(key => Array.isArray(node[key]) && node[key].some(action => action?.['##eventHandlerType'] === 'Save Row'))
-        if (key) { screen = candidate; button = node; eventKey = key }
+        if (key) { candidateButton = node; candidateEvent = key }
       }
     })
+    if (candidateForm && candidateButton) {
+      screen = candidate; form = candidateForm; button = candidateButton; eventKey = candidateEvent
+      break
+    }
   }
   assert.ok(screen && form && button && eventKey, 'Imported fixture contains a form and Save Row button')
   const originalActions = structuredClone(button[eventKey])
@@ -89,7 +97,7 @@ async function main() {
       }
     })
     await json(await context.request.post('/api/screens', { headers, data: currentScreen }), `save-screen-${mode}`)
-    await json(await context.request.post(`/api/applications/${app._id}/publish`, { headers, data: {} }), `publish-${mode}`)
+    await json(await context.request.post(`/api/applications/${appId}/publish`, { headers, data: {} }), `publish-${mode}`)
   }
 
   async function exercise(mode, variant) {
