@@ -20,7 +20,7 @@ env:
   CI: true
   NX_DAEMON: false
   BASE_SHA: 6081fb70b2447119ccdac44519e9a587a134b1c2
-  CANDIDATE_SHA: a5fe6315435a9045059ec1733eebfb8d727c3edb
+  CANDIDATE_SHA: 95409b10ef2cc090e29f0f43c674a1be7e35720e
   BUDIBASE_IMAGE: budibase/budibase@sha256:79a09831f46da5e67138ff13d95b26c8ff89cd484d398ac8ff85510e14ba8c8d
 
 jobs:
@@ -106,8 +106,9 @@ jobs:
       - name: Build API-layer candidate without changing Save Row
         run: |
           git show "$CANDIDATE_SHA:packages/client/src/api/api.ts" > packages/client/src/api/api.ts
+          test "$(git hash-object packages/client/src/api/api.ts)" = "$(git rev-parse "$CANDIDATE_SHA:packages/client/src/api/api.ts")"
           git diff --exit-code "$BASE_SHA" -- packages/client/src/utils/buttonActions.js
-          git diff -- "$BASE_SHA" > evidence/source.patch
+          git diff "$BASE_SHA" -- packages/client/src/api/api.ts > evidence/source.patch
           yarn workspace @budibase/client build 2>&1 | tee evidence/candidate-build.log
           cp -a packages/client/dist "$RUNNER_TEMP/client-candidate"
           sha256sum "$RUNNER_TEMP/client-upstream/budibase-client.js" "$RUNNER_TEMP/client-candidate/budibase-client.js" > evidence/bundle-sha256.txt
