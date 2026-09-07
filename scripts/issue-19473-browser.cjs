@@ -80,6 +80,17 @@ async function main() {
     actions: originalActions.map(action => action['##eventHandlerType']),
     table: { primaryDisplay: table.primaryDisplay, schema: table.schema },
   }
+  // Publishing synchronises resources but deliberately leaves newly imported
+  // apps disabled unless their owner has explicitly enabled them. Do this only
+  // for this disposable fixture; do not change roles or authentication.
+  const workspaceApp = await json(await context.request.get(`/api/workspaceApp/${screen.workspaceAppId}`, { headers }), 'workspace-app')
+  report.workspaceApp = { id: workspaceApp._id, url: workspaceApp.url, disabledBefore: workspaceApp.disabled ?? null }
+  const editable = Object.fromEntries(['_id', '_rev', 'name', 'url', 'navigation', 'theme', 'customTheme', 'projectIds'].filter(key => workspaceApp[key] !== undefined).map(key => [key, workspaceApp[key]]))
+  const enabled = await json(await context.request.put(`/api/workspaceApp/${screen.workspaceAppId}`, {
+    headers, data: { ...editable, disabled: false },
+  }), 'enable-isolated-workspace-app')
+  assert.equal(enabled.workspaceApp?.disabled, false, 'The fixture owner explicitly enabled the test app')
+  report.workspaceApp.disabledAfter = false
   const buttonName = button.text || button._instanceName
   let appUrl
 
@@ -98,8 +109,10 @@ async function main() {
       }
     })
     await json(await context.request.post('/api/screens', { headers, data: currentScreen }), `save-screen-${mode}`)
-    await json(await context.request.post(`/api/applications/${appId}/publish`, { headers, data: {} }), `publish-${mode}`)
+    const deployment = await json(await context.request.post(`/api/applications/${appId}/publish`, { headers, data: {} }), `publish-${mode}`)
+    report.lastDeployment = deployment
     const catalogue = await json(await context.request.get('/api/client/applications'), `published-apps-${mode}`)
+    report.publishedCatalogue = catalogue
     const prodId = appId.replace('app_dev_', 'app_')
     const published = catalogue.apps.find(item => item.appId === `${prodId}_${screen.workspaceAppId}`)
     assert.ok(published?.url, 'Published catalogue contains the exact imported workspace app')
