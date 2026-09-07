@@ -17,7 +17,7 @@ env:
   CI: true
   NX_DAEMON: false
   BASE_SHA: 6081fb70b2447119ccdac44519e9a587a134b1c2
-  SOURCE_SHA: a5fe6315435a9045059ec1733eebfb8d727c3edb
+  SOURCE_SHA: 95409b10ef2cc090e29f0f43c674a1be7e35720e
 
 jobs:
   native:
@@ -30,14 +30,22 @@ jobs:
           ref: ${{ env.SOURCE_SHA }}
           persist-credentials: false
           submodules: false
-          fetch-depth: 2
+          fetch-depth: 3
       - uses: actions/setup-node@v6
         with:
           node-version: 22.x
-      - name: Prepare dependencies
+      - name: Prepare evidence
         run: |
           mkdir -p evidence
           git rev-parse HEAD | tee evidence/source-sha.txt
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            node_modules
+            packages/*/node_modules
+          key: issue-19473-browser-${{ runner.os }}-node22-${{ hashFiles('yarn.lock') }}
+      - name: Prepare dependencies
+        run: |
           npm install --global yarn@1.22.22
           yarn --frozen-lockfile 2>&1 | tee evidence/install.log
           yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/build.log
@@ -67,7 +75,7 @@ jobs:
         id: tests
         continue-on-error: true
         run: |
-          git diff --exit-code -- packages/client/src/api/api.ts
+          git diff --exit-code -- packages/
           yarn workspace @budibase/client test --reporter=default --reporter=json --outputFile="$GITHUB_WORKSPACE/evidence/green.json" 2>&1 | tee evidence/green.log
       - name: Check production and test formatting and lint
         id: lint
@@ -75,11 +83,6 @@ jobs:
         run: |
           yarn eslint packages/client/src/api/api.ts packages/client/src/api/api.test.js 2>&1 | tee evidence/eslint.log
           yarn prettier --check packages/client/src/api/api.ts packages/client/src/api/api.test.js 2>&1 | tee evidence/prettier.log
-      - name: Capture any formatting-only correction for review
-        if: always()
-        run: |
-          yarn prettier --write packages/client/src/api/api.test.js >/dev/null
-          git diff -- packages/client/src/api/api.test.js > evidence/formatting.patch
       - name: Svelte type checks
         id: types
         continue-on-error: true
@@ -93,6 +96,7 @@ jobs:
           TYPES: ${{ steps.types.outcome }}
         run: |
           printf 'red=%s\ngreen=%s\nlint=%s\ntypes=%s\n' "$RED" "$GREEN" "$LINT" "$TYPES" | tee evidence/outcome.txt >> "$GITHUB_STEP_SUMMARY"
+          git diff --exit-code -- packages/
           test "$RED" = success && test "$GREEN" = success && test "$LINT" = success && test "$TYPES" = success
       - uses: actions/upload-artifact@v4
         if: always()
