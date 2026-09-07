@@ -1,0 +1,102 @@
+name: Issue 19473 schema error verification
+
+on:
+  push:
+    branches: [ci/19473-candidate]
+    paths: [.github/workflows/issue-19473-schema-errors.yml]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  HUSKY: 0
+  CI: true
+  NX_DAEMON: false
+  BASE_SHA: 6081fb70b2447119ccdac44519e9a587a134b1c2
+  SOURCE_SHA: a5fe6315435a9045059ec1733eebfb8d727c3edb
+
+jobs:
+  native:
+    if: github.repository == 'AyobamiH/budibase'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+          submodules: false
+          fetch-depth: 2
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.x
+      - name: Prepare dependencies
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD | tee evidence/source-sha.txt
+          npm install --global yarn@1.22.22
+          yarn --frozen-lockfile 2>&1 | tee evidence/install.log
+          yarn build --scope @budibase/client --include-dependencies 2>&1 | tee evidence/build.log
+      - name: Prove the new tests fail only for missing-message validation
+        id: red
+        continue-on-error: true
+        run: |
+          file=packages/client/src/api/api.ts
+          cp "$file" "$RUNNER_TEMP/api.candidate.ts"
+          trap 'cp "$RUNNER_TEMP/api.candidate.ts" "$file"' EXIT
+          git show "$BASE_SHA:$file" > "$file"
+          set +e
+          yarn workspace @budibase/client test src/api/api.test.js --reporter=default --reporter=json --outputFile="$GITHUB_WORKSPACE/evidence/red.json" 2>&1 | tee evidence/red.log
+          code=${PIPESTATUS[0]}
+          set -e
+          test "$code" -eq 1
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'
+          const report = JSON.parse(fs.readFileSync('evidence/red.json', 'utf8'))
+          const failed = report.testResults.flatMap(suite => suite.assertionResults).filter(test => test.status === 'failed')
+          if (report.numTotalTests !== 17 || report.numFailedTests !== 3 || failed.some(test => !test.title.startsWith('shows structured validation errors without a message') && test.title !== 'shows every field error without requiring a general message')) {
+            throw new Error(`Unexpected regression outcome: ${JSON.stringify(failed)}`)
+          }
+          console.log('Exactly three missing-message regressions fail; fourteen control cases pass.')
+          JS
+      - name: Complete native client suite
+        id: tests
+        continue-on-error: true
+        run: |
+          git diff --exit-code -- packages/client/src/api/api.ts
+          yarn workspace @budibase/client test --reporter=default --reporter=json --outputFile="$GITHUB_WORKSPACE/evidence/green.json" 2>&1 | tee evidence/green.log
+      - name: Check production and test formatting and lint
+        id: lint
+        continue-on-error: true
+        run: |
+          yarn eslint packages/client/src/api/api.ts packages/client/src/api/api.test.js 2>&1 | tee evidence/eslint.log
+          yarn prettier --check packages/client/src/api/api.ts packages/client/src/api/api.test.js 2>&1 | tee evidence/prettier.log
+      - name: Capture any formatting-only correction for review
+        if: always()
+        run: |
+          yarn prettier --write packages/client/src/api/api.test.js >/dev/null
+          git diff -- packages/client/src/api/api.test.js > evidence/formatting.patch
+      - name: Svelte type checks
+        id: types
+        continue-on-error: true
+        run: yarn workspace @budibase/client check:types 2>&1 | tee evidence/types.log
+      - name: Final gate
+        if: always()
+        env:
+          RED: ${{ steps.red.outcome }}
+          GREEN: ${{ steps.tests.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPES: ${{ steps.types.outcome }}
+        run: |
+          printf 'red=%s\ngreen=%s\nlint=%s\ntypes=%s\n' "$RED" "$GREEN" "$LINT" "$TYPES" | tee evidence/outcome.txt >> "$GITHUB_STEP_SUMMARY"
+          test "$RED" = success && test "$GREEN" = success && test "$LINT" = success && test "$TYPES" = success
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: issue-19473-schema-errors-native
+          path: evidence/
+          retention-days: 7
