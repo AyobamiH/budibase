@@ -58,6 +58,7 @@ export const API = createAPIClient({
   onError: error => {
     const { status, method, url, message, handled, suppressErrors } =
       error || {}
+    const validationErrors = error?.json?.validationErrors
     const suppressErrorNotifications =
       !!get(appStore)?.application?.features?.suppressErrorNotifications
     const ignoreErrorUrls = [
@@ -79,7 +80,8 @@ export const API = createAPIClient({
     }
 
     // Notify all errors, but show a persistent banner for 401/403 (session not authenticated)
-    if (message && !suppressErrors) {
+    // Validation responses may lack a message, and HTTP/2 has no status text.
+    if ((message || validationErrors) && !suppressErrors) {
       let ignore = false
       for (let ignoreUrl of ignoreErrorUrls) {
         if (url?.includes(ignoreUrl)) {
@@ -88,7 +90,6 @@ export const API = createAPIClient({
         }
       }
       if (!ignore) {
-        const validationErrors = error?.json?.validationErrors
         if (status === 401 || status === 403) {
           sessionBannerStore.set({
             text: "Session not authenticated",
