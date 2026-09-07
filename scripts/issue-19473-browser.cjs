@@ -72,15 +72,16 @@ async function main() {
   assert.ok(screen && form && button && eventKey, 'Imported fixture contains a form and Save Row button')
   const originalActions = structuredClone(button[eventKey])
   const save = originalActions.find(action => action['##eventHandlerType'] === 'Save Row')
+  const table = await json(await context.request.get(`/api/tables/${save.parameters.tableId}`, { headers }), 'fixture-table')
   report.fixture = {
     formId: form._id,
     saveProviderId: save.parameters.providerId ?? null,
     fieldOverrideKeys: Object.keys(save.parameters.fields || {}),
     actions: originalActions.map(action => action['##eventHandlerType']),
+    table: { primaryDisplay: table.primaryDisplay, schema: table.schema },
   }
   const buttonName = button.text || button._instanceName
-  const appUrl = `${origin}/app${app.url.startsWith('/') ? app.url : '/' + app.url}`
-  report.appPath = new URL(appUrl).pathname
+  let appUrl
 
   async function configure(mode) {
     const response = await json(await context.request.get('/api/screens', { headers }), `screens-${mode}`)
@@ -98,11 +99,17 @@ async function main() {
     })
     await json(await context.request.post('/api/screens', { headers, data: currentScreen }), `save-screen-${mode}`)
     await json(await context.request.post(`/api/applications/${appId}/publish`, { headers, data: {} }), `publish-${mode}`)
+    const catalogue = await json(await context.request.get('/api/client/applications'), `published-apps-${mode}`)
+    const prodId = appId.replace('app_dev_', 'app_')
+    const published = catalogue.apps.find(item => item.appId === `${prodId}_${screen.workspaceAppId}`)
+    assert.ok(published?.url, 'Published catalogue contains the exact imported workspace app')
+    appUrl = `${origin}/app${published.url.startsWith('/') ? published.url : '/' + published.url}`
+    report.appPath = new URL(appUrl).pathname
   }
 
   async function exercise(mode, variant) {
     page = await context.newPage()
-    const entry = { mode, variant, assetOverrides: [], requests: [], responses: [], pageErrors: [] }
+    const entry = { mode, variant, assetOverrides: [], requests: [], responses: [], networkErrors: [], pageErrors: [] }
     report.cases.push(entry)
     const dist = path.join(process.env.RUNNER_TEMP, `client-${variant}`)
     await page.route('**/api/assets/**', async route => {
@@ -122,6 +129,11 @@ async function main() {
       }
     })
     page.on('response', async response => {
+      if (response.status() >= 400 && response.url().startsWith(origin + '/api/')) {
+        let body
+        try { body = await response.json() } catch { body = null }
+        entry.networkErrors.push({ path: new URL(response.url()).pathname, status: response.status(), body })
+      }
       if (response.request().method() === 'POST' && /\/rows(?:\?|$)/.test(response.url())) {
         let body
         try { body = await response.json() } catch { body = null }
